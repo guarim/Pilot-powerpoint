@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Contrôle PowerPoint via IA</title>
+    <!-- Styles CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+    <style>
+        body { background-color: #1e1e2e; color: white; font-family: sans-serif; overflow: hidden; }
+        .container { position: relative; width: 1280px; height: 720px; margin: 0 auto; margin-top: 20px; }
+        video { display: none; } /* On cache la vidéo brute pour afficher le canvas traité */
+        canvas { position: absolute; top: 0; left: 0; transform: scaleX(-1); /* Effet miroir */ border-radius: 12px; }
+        #drawCanvas { z-index: 10; pointer-events: none; } /* Calque de dessin */
+        .hud { position: absolute; top: 10px; left: 10px; z-index: 20; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; }
+        .status-box { font-size: 24px; font-weight: bold; margin-bottom: 10px; color: #4ade80; }
+        .instruction { font-size: 14px; color: #cbd5e1; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Flux vidéo caché -->
+        <video id="input_video"></video>
+        <!-- Rendu Vidéo + Squelette main -->
+        <canvas id="output_canvas" width="1280" height="720"></canvas>
+        <!-- Calque pour le dessin avec l'index -->
+        <canvas id="draw_canvas" width="1280" height="720"></canvas>
+
+        <div class="hud">
+            <div id="status" class="status-box">En attente...</div>
+            <div class="instruction">👈 Main GAUCHE : Poing fermé pour activer les commandes</div>
+            <div class="instruction">👉 Main DROITE : Balayage pour changer diapo</div>
+            <div class="instruction">☝️ Main DROITE : Index levé pour dessiner</div>
+            <div class="instruction">🖐️ Main DROITE : Main ouverte pour effacer</div>
+            <div class="instruction">✊ + ✊ Deux poings : Arrêter le diaporama</div>
+        </div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const drawCanvas = document.getElementById('draw_canvas');
+        const drawCtx = drawCanvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+
+        // Variables d'état
+        let lastRightHandX = null;
+        let lastActionTime = 0;
+        const COOLDOWN = 1500; // Temps d'attente entre deux diapos (ms)
+        let isDrawing = false;
+        let lastDrawX = 0;
+        let lastDrawY = 0;
+
+        // Configuration du trait de dessin
+        drawCtx.lineWidth = 5;
+        drawCtx.lineCap = "round";
+        drawCtx.strokeStyle = "#FFFF00"; // Jaune fluo
+
+        // --- FONCTIONS DE DÉTECTION DE FORME ---
+
+        // Calcul de la distance euclidienne
+        function distance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        // Vérifie si la main est un poing (tous les doigts pliés)
+        function isFist(landmarks) {
+            // Astuce simple : le bout du doigt (TIP) est plus bas que l'articulation (PIP)
+            // (Note: Y augmente vers le bas de l'écran)
+            const fingers = [8, 12, 16, 20]; // Index, Majeur, Annulaire, Auriculaire
+            let foldedFingers = 0;
+            
+            // On compare le bout du doigt avec son articulation inférieure
+            // Pour être robuste quelque soit l'orientation, on utilise la distance au poignet (0)
+            const wrist = landmarks[0];
+            const tips = [landmarks[8], landmarks[12], landmarks[16], landmarks[20]];
+            const pips = [landmarks[6], landmarks[10], landmarks[14], landmarks[18]];
+
+            for (let i = 0; i < 4; i++) {
+                // Si la distance poignet-bout est plus petite que poignet-articulation, le doigt est plié
+                if (distance(wrist, tips[i]) < distance(wrist, pips[i])) {
+                    foldedFingers++;
+                }
+            }
+            return foldedFingers >= 3; // Au moins 3 doigts pliés (on tolère le pouce)
+        }
+
+        // Vérifie si seul l'index est levé
+        function isIndexPointing(landmarks) {
+            const wrist = landmarks[0];
+            // Index doit être tendu
+            const indexExtended = distance(wrist, landmarks[8]) > distance(wrist, landmarks[6]);
+            // Les autres doivent être pliés
+            const middleFolded = distance(wrist, landmarks[12]) < distance(wrist, landmarks[10]);
+            const ringFolded = distance(wrist, landmarks[16]) < distance(wrist, landmarks[14]);
+            const pinkyFolded = distance(wrist, landmarks[20]) < distance(wrist, landmarks[18]);
+
+            return indexExtended && middleFolded && ringFolded && pinkyFolded;
+        }
+
+        // Vérifie si la main est ouverte (effacer)
+        function isOpenPalm(landmarks) {
+            const wrist = landmarks[0];
+            // Tous les doigts tendus
+            let extendedCount = 0;
+            const tips = [8, 12, 16, 20];
+            const pips = [6, 10, 14, 18];
+            
+            tips.forEach((tipIdx, i) => {
+                 if (distance(wrist, landmarks[tipIdx]) > distance(wrist, landmarks[pips[i]])) {
+                     extendedCount++;
+                 }
+            });
+            return extendedCount === 4; // Tous les doigts (hors pouce) levés
+        }
+
+        // --- COMMUNICATION AVEC LE SERVEUR ---
+        async function sendCommand(command) {
+            const now = Date.now();
+            // Anti-rebond (Sauf pour stop et draw)
+            if (command !== 'draw' && command !== 'erase' && now - lastActionTime < COOLDOWN) return;
+            
+            console.log("Commande : " + command);
+            statusDiv.innerText = "Action : " + command.toUpperCase();
+            
+            if (command !== 'draw') lastActionTime = now;
+
+            // Envoi au serveur Node.js local
+            try {
+                await fetch('http://localhost:3000/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: command })
+                });
+            } catch (e) {
+                console.warn("Serveur non connecté. Lancez 'node server.js'");
+            }
+        }
+
+        // --- TRAITEMENT MEDIAPIPE ---
+        function onResults(results) {
+            // Nettoyage canvas
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            let leftHand = null;
+            let rightHand = null;
+
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let index = 0; index < results.multiHandLandmarks.length; index++) {
+                    const classification = results.multiHandedness[index];
+                    const isRightHand = classification.label === 'Right'; // MediaPipe inverse souvent en mode selfie
+                    const landmarks = results.multiHandLandmarks[index];
+
+                    // Dessiner le squelette
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: isRightHand ? '#00FF00' : '#FF0000', lineWidth: 5});
+                    drawLandmarks(canvasCtx, landmarks, {color: '#FFFFFF', lineWidth: 2});
+
+                    if (classification.label === 'Left') leftHand = landmarks; // Main gauche réelle (étiquette Left)
+                    if (classification.label === 'Right') rightHand = landmarks; // Main droite réelle
+                }
+            }
+
+            // --- LOGIQUE METIER ---
+
+            // 1. ARRÊT DU DIAPORAMA (Deux poings)
+            if (leftHand && rightHand && isFist(leftHand) && isFist(rightHand)) {
+                sendCommand('stop');
+                canvasCtx.restore();
+                return;
+            }
+
+            // 2. LOGIQUE DE NAVIGATION (Nécessite Main Gauche Poing Fermé)
+            if (leftHand && isFist(leftHand)) {
+                if (rightHand) {
+                    const currentX = rightHand[9].x; // On prend la base du majeur comme centre
+
+                    if (lastRightHandX !== null) {
+                        const delta = currentX - lastRightHandX;
+                        const SENSITIVITY = 0.08; // Seuil de mouvement
+
+                        // Attention : en mode miroir, X s'inverse visuellement mais les coords restent 0->1
+                        // Gauche de l'image = 0, Droite = 1.
+                        // Mouvement "Droite vers Gauche" (Next) -> X diminue
+                        // Mouvement "Gauche vers Droite" (Prev) -> X augmente
+                        
+                        if (delta < -SENSITIVITY) {
+                            sendCommand('next'); // Swipe vers la gauche (visuellement droite)
+                            lastRightHandX = null; // Reset pour forcer un nouveau geste
+                        } else if (delta > SENSITIVITY) {
+                            sendCommand('previous'); // Swipe vers la droite
+                            lastRightHandX = null;
+                        }
+                    } else {
+                        lastRightHandX = currentX;
+                    }
+                }
+            } else {
+                lastRightHandX = null; // Reset si la main gauche n'est pas fermée
+            }
+
+            // 3. DESSIN (Index levé main droite)
+            if (rightHand && isIndexPointing(rightHand)) {
+                const tip = rightHand[8];
+                const x = tip.x * drawCanvas.width;
+                const y = tip.y * drawCanvas.height;
+
+                if (!isDrawing) {
+                    isDrawing = true;
+                    drawCtx.beginPath();
+                    drawCtx.moveTo(x, y);
+                } else {
+                    drawCtx.lineTo(x, y);
+                    drawCtx.stroke();
+                }
+                statusDiv.innerText = "Mode : CRAYON";
+            } else {
+                isDrawing = false;
+            }
+
+            // 4. EFFACER (Main droite ouverte)
+            if (rightHand && isOpenPalm(rightHand)) {
+                drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+                statusDiv.innerText = "Mode : EFFACER";
+            }
+
+            canvasCtx.restore();
+        }
+
+        // --- INITIALISATION ---
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720
+        });
+        camera.start();
+
+    </script>
+</body>
+</html>
