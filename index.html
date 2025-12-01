@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diaporama par Gestes</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: white;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+        .slide-container {
+            position: relative;
+            width: 1200px;
+            height: 700px;
+            border: 3px solid #333;
+            background: #000;
+            overflow: hidden;
+        }
+        .slide-container img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        .drawing-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .right-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .params-container {
+            width: 640px;
+            padding: 20px;
+            background: #2a2a2a;
+            border: 2px solid #444;
+            border-radius: 8px;
+        }
+        .params-container h3 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        .param-line {
+            margin: 10px 0;
+            font-size: 14px;
+        }
+        .video-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border: 2px solid #444;
+        }
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .status {
+            padding: 10px;
+            background: #333;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        .status.active {
+            background: #4CAF50;
+        }
+        .status.error {
+            background: #f44336;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="slide-container">
+            <img id="slideImage" src="asset/1.png" alt="Slide">
+            <canvas id="drawingCanvas" class="drawing-canvas"></canvas>
+        </div>
+        
+        <div class="right-panel">
+            <div class="params-container">
+                <h3>Paramètres de contrôle</h3>
+                <div id="status" class="status">Initialisation...</div>
+                <div class="param-line"><strong>Main gauche détectée:</strong> <span id="leftHandDetected">Non</span></div>
+                <div class="param-line"><strong>Main droite détectée:</strong> <span id="rightHandDetected">Non</span></div>
+                <div class="param-line"><strong>Position index gauche:</strong> <span id="leftIndexPos">-</span></div>
+                <div class="param-line"><strong>Position index droite:</strong> <span id="rightIndexPos">-</span></div>
+                <div class="param-line"><strong>Mouvement main droite:</strong> <span id="rightHandMovement">-</span></div>
+                <div class="param-line"><strong>Geste détecté:</strong> <span id="gestureDetected">-</span></div>
+                <div class="param-line"><strong>Diapo active:</strong> <span id="currentSlide">1</span></div>
+                <div class="param-line"><strong>Total diapos:</strong> <span id="totalSlides">5</span></div>
+            </div>
+            
+            <div class="video-container">
+                <video id="videoElement" width="640" height="480" autoplay></video>
+                <canvas id="outputCanvas" width="640" height="480"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('videoElement');
+        const canvasElement = document.getElementById('outputCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const drawingCanvas = document.getElementById('drawingCanvas');
+        const drawingCtx = drawingCanvas.getContext('2d');
+        const slideImage = document.getElementById('slideImage');
+        
+        // Ajuster la taille du canvas de dessin
+        drawingCanvas.width = 1200;
+        drawingCanvas.height = 700;
+        
+        let currentSlide = 1;
+        const totalSlides = 10; // Ajustez selon le nombre d'images disponibles
+        let isDrawing = false;
+        let lastDrawPoint = null;
+        let programActive = true;
+        
+        // Variables pour la détection de mouvement
+        let rightHandHistory = [];
+        const historySize = 10;
+        let lastGestureTime = 0;
+        const gestureDelay = 1000; // 1 seconde entre chaque geste
+        
+        document.getElementById('totalSlides').textContent = totalSlides;
+        
+        // Configuration MediaPipe Hands
+        const hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+        
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+        
+        hands.onResults(onResults);
+        
+        // Fonctions utilitaires
+        function isIndexUp(landmarks) {
+            // Index levé si le bout de l'index est au-dessus de la base
+            return landmarks[8].y < landmarks[6].y;
+        }
+        
+        function isFistClosed(landmarks) {
+            // Poing fermé si tous les doigts sont en bas
+            const fingersDown = 
+                landmarks[8].y > landmarks[6].y && // Index
+                landmarks[12].y > landmarks[10].y && // Majeur
+                landmarks[16].y > landmarks[14].y && // Annulaire
+                landmarks[20].y > landmarks[18].y; // Auriculaire
+            return fingersDown;
+        }
+        
+        function isOnlyIndexUp(landmarks) {
+            // Seul l'index levé
+            return landmarks[8].y < landmarks[6].y && // Index levé
+                   landmarks[12].y > landmarks[10].y && // Majeur baissé
+                   landmarks[16].y > landmarks[14].y && // Annulaire baissé
+                   landmarks[20].y > landmarks[18].y; // Auriculaire baissé
+        }
+        
+        function isIndexTouchingThumb(landmarks) {
+            const indexTip = landmarks[8];
+            const thumbTip = landmarks[4];
+            const distance = Math.sqrt(
+                Math.pow(indexTip.x - thumbTip.x, 2) + 
+                Math.pow(indexTip.y - thumbTip.y, 2)
+            );
+            return distance < 0.05;
+        }
+        
+        function detectSwipe(history) {
+            if (history.length < historySize) return null;
+            
+            const start = history[0];
+            const end = history[history.length - 1];
+            const deltaX = end.x - start.x;
+            
+            if (Math.abs(deltaX) > 0.15) {
+                return deltaX > 0 ? 'droite' : 'gauche';
+            }
+            return null;
+        }
+        
+        function changeSlide(direction) {
+            if (direction === 'suivante' && currentSlide < totalSlides) {
+                currentSlide++;
+            } else if (direction === 'précédente' && currentSlide > 1) {
+                currentSlide--;
+            }
+            slideImage.src = `asset/${currentSlide}.png`;
+            document.getElementById('currentSlide').textContent = currentSlide;
+            clearDrawing();
+        }
+        
+        function clearDrawing() {
+            drawingCtx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+            lastDrawPoint = null;
+        }
+        
+        function drawLine(x, y) {
+            const canvasX = x * drawingCanvas.width;
+            const canvasY = y * drawingCanvas.height;
+            
+            if (lastDrawPoint) {
+                drawingCtx.beginPath();
+                drawingCtx.moveTo(lastDrawPoint.x, lastDrawPoint.y);
+                drawingCtx.lineTo(canvasX, canvasY);
+                drawingCtx.strokeStyle = '#FF0000';
+                drawingCtx.lineWidth = 3;
+                drawingCtx.lineCap = 'round';
+                drawingCtx.stroke();
+            }
+            lastDrawPoint = { x: canvasX, y: canvasY };
+        }
+        
+        function onResults(results) {
+            if (!programActive) return;
+            
+            // Dessiner la vidéo et les mains
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            
+            let leftHand = null;
+            let rightHand = null;
+            
+            // Identifier les mains
+            if (results.multiHandedness && results.multiHandLandmarks) {
+                for (let i = 0; i < results.multiHandedness.length; i++) {
+                    const handedness = results.multiHandedness[i].label;
+                    const landmarks = results.multiHandLandmarks[i];
+                    
+                    // Dessiner les mains
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                    drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 1});
+                    
+                    if (handedness === 'Left') {
+                        rightHand = landmarks; // Inversé car caméra miroir
+                    } else {
+                        leftHand = landmarks;
+                    }
+                }
+            }
+            
+            // Mise à jour de l'interface
+            document.getElementById('leftHandDetected').textContent = leftHand ? 'Oui' : 'Non';
+            document.getElementById('rightHandDetected').textContent = rightHand ? 'Oui' : 'Non';
+            
+            if (leftHand) {
+                const leftIndex = leftHand[8];
+                document.getElementById('leftIndexPos').textContent = 
+                    `x: ${leftIndex.x.toFixed(2)}, y: ${leftIndex.y.toFixed(2)}`;
+            } else {
+                document.getElementById('leftIndexPos').textContent = '-';
+            }
+            
+            if (rightHand) {
+                const rightIndex = rightHand[8];
+                document.getElementById('rightIndexPos').textContent = 
+                    `x: ${rightIndex.x.toFixed(2)}, y: ${rightIndex.y.toFixed(2)}`;
+                
+                // Historique pour détection de mouvement
+                rightHandHistory.push({x: rightIndex.x, y: rightIndex.y, time: Date.now()});
+                if (rightHandHistory.length > historySize) {
+                    rightHandHistory.shift();
+                }
+            } else {
+                document.getElementById('rightIndexPos').textContent = '-';
+                rightHandHistory = [];
+            }
+            
+            const now = Date.now();
+            
+            // Logique de gestes
+            if (leftHand && rightHand) {
+                // Arrêt du programme : deux poings fermés
+                if (isFistClosed(leftHand) && isFistClosed(rightHand)) {
+                    programActive = false;
+                    document.getElementById('status').textContent = 'Programme arrêté';
+                    document.getElementById('status').className = 'status error';
+                    document.getElementById('gestureDetected').textContent = 'Arrêt (2 poings fermés)';
+                    return;
+                }
+                
+                // Navigation : index gauche levé + swipe main droite
+                if (isOnlyIndexUp(leftHand) && now - lastGestureTime > gestureDelay) {
+                    const swipe = detectSwipe(rightHandHistory);
+                    if (swipe) {
+                        document.getElementById('rightHandMovement').textContent = 
+                            swipe === 'droite' ? 'Gauche → Droite' : 'Droite → Gauche';
+                        
+                        if (swipe === 'droite') {
+                            changeSlide('suivante');
+                            document.getElementById('gestureDetected').textContent = 'Diapo suivante';
+                            lastGestureTime = now;
+                        } else if (swipe === 'gauche') {
+                            changeSlide('précédente');
+                            document.getElementById('gestureDetected').textContent = 'Diapo précédente';
+                            lastGestureTime = now;
+                        }
+                    }
+                }
+                
+                // Dessin : index droit levé + poing gauche fermé
+                if (isOnlyIndexUp(rightHand) && isFistClosed(leftHand)) {
+                    const indexTip = rightHand[8];
+                    drawLine(indexTip.x, indexTip.y);
+                    isDrawing = true;
+                    document.getElementById('gestureDetected').textContent = 'Mode dessin actif';
+                } else {
+                    if (isDrawing) {
+                        lastDrawPoint = null;
+                        isDrawing = false;
+                    }
+                }
+                
+                // Effacer : index touche pouce main droite
+                if (isIndexTouchingThumb(rightHand)) {
+                    clearDrawing();
+                    document.getElementById('gestureDetected').textContent = 'Tracé effacé';
+                }
+            } else {
+                lastDrawPoint = null;
+                isDrawing = false;
+                if (programActive) {
+                    document.getElementById('gestureDetected').textContent = '-';
+                }
+            }
+            
+            canvasCtx.restore();
+        }
+        
+        // Démarrage de la caméra
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        
+        camera.start().then(() => {
+            document.getElementById('status').textContent = 'Système actif';
+            document.getElementById('status').className = 'status active';
+        }).catch(err => {
+            document.getElementById('status').textContent = 'Erreur caméra: ' + err.message;
+            document.getElementById('status').className = 'status error';
+        });
+    </script>
+</body>
+</html>
