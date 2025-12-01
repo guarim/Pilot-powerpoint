@@ -2,19 +2,29 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
-  <title>Gesture Diaporama</title>
+  <title>Gesture Diaporama Debug</title>
   <style>
-    body { display:flex; flex-direction:column; align-items:center; font-family:sans-serif; }
+    body { display:flex; flex-direction:row; gap:20px; font-family:sans-serif; }
+    #left { display:flex; flex-direction:column; gap:10px; }
     #viewer { width:800px; height:450px; border:1px solid #ccc; background-size:contain; background-repeat:no-repeat; background-position:center; }
-    canvas { position:absolute; left:0; top:0; }
-    #wrapper { position:relative; }
+    #drawCanvas, #videoCanvas { position:absolute; left:0; top:0; }
+    #wrapper { position:relative; width:800px; height:450px; }
+    #debug { width:300px; height:450px; overflow:auto; border:1px solid #999; padding:10px; font-size:14px; background:#f7f7f7; }
   </style>
 </head>
 <body>
-  <h1>Gesture Diaporama</h1>
-  <div id="wrapper">
-    <div id="viewer"></div>
-    <canvas id="drawCanvas" width="800" height="450"></canvas>
+  <div id="left">
+    <h2>Diaporama</h2>
+    <div id="wrapper">
+      <div id="viewer"></div>
+      <canvas id="drawCanvas" width="800" height="450"></canvas>
+      <canvas id="videoCanvas" width="800" height="450"></canvas>
+    </div>
+  </div>
+
+  <div id="debug">
+    <h3>Debug</h3>
+    <pre id="debugText">En attente...</pre>
   </div>
 
   <video id="video" autoplay playsinline style="display:none"></video>
@@ -29,8 +39,12 @@
     const viewer = document.getElementById("viewer");
     viewer.style.backgroundImage = `url(${images[index]})`;
 
-    const canvas = document.getElementById("drawCanvas");
-    const ctx = canvas.getContext("2d");
+    const drawCanvas = document.getElementById("drawCanvas");
+    const drawCtx = drawCanvas.getContext("2d");
+    const videoCanvas = document.getElementById("videoCanvas");
+    const videoCtx = videoCanvas.getContext("2d");
+
+    const debugText = document.getElementById("debugText");
 
     let drawing = false;
     let lastX = null, lastY = null;
@@ -46,76 +60,92 @@
     }
 
     function clearDrawing() {
-      ctx.clearRect(0,0,canvas.width,canvas.height);
+      drawCtx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
     }
 
+    // Détection poing plus fiable avec distances doigts
     function isFist(landmarks) {
-      // Détection poing très simplifiée : doigts repliés
-      const tips = [8,12,16,20];
-      const mcp = [5,9,13,17];
-      let count = 0;
-      for (let i=0;i<4;i++) if (landmarks[tips[i]].y > landmarks[mcp[i]].y) count++;
-      return count>=3;
+      const folded = [8,12,16,20].map(tip => landmarks[tip].y > landmarks[0].y + 0.05);
+      return folded.filter(x=>x).length >= 3;
     }
 
     function isIndexOnly(landmarks) {
       const indexUp = landmarks[8].y < landmarks[6].y;
-      const othersDown = landmarks[12].y > landmarks[10].y && landmarks[16].y > landmarks[14].y && landmarks[20].y > landmarks[18].y;
-      return indexUp && othersDown;
+      const middleDown = landmarks[12].y > landmarks[10].y;
+      const ringDown = landmarks[16].y > landmarks[14].y;
+      const pinkyDown = landmarks[20].y > landmarks[18].y;
+      return indexUp && middleDown && ringDown && pinkyDown;
     }
 
     function isPinch(landmarks) {
       const dx = landmarks[8].x - landmarks[4].x;
       const dy = landmarks[8].y - landmarks[4].y;
-      return Math.hypot(dx,dy) < 0.03;
+      return Math.hypot(dx,dy) < 0.02;
     }
 
     let lastRightX = null;
     let gestureCooldown = 0;
 
+    function drawHands(image, hands) {
+      videoCtx.clearRect(0,0,videoCanvas.width,videoCanvas.height);
+      videoCtx.drawImage(image,0,0,videoCanvas.width,videoCanvas.height);
+      for (const lm of hands) {
+        window.drawConnectors(videoCtx, lm, window.HAND_CONNECTIONS);
+        window.drawLandmarks(videoCtx, lm);
+      }
+    }
+
     function onResults(results) {
       if (gestureCooldown > 0) gestureCooldown--;
+
+      drawHands(results.image, results.multiHandLandmarks || []);
+
+      // Debug info
+      debugText.textContent = JSON.stringify({
+        handsDetected: results.multiHandedness || [],
+        gestures: {}
+      }, null, 2);
 
       if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
 
       let right = null, left = null;
       results.multiHandedness.forEach((h,i)=>{
         if (h.label === "Right") right = results.multiHandLandmarks[i];
-        else left = results.multiHandLandLandmarks[i];
+        else left = results.multiHandLandmarks[i];
       });
 
+      // Déplacements main droite
       if (right) {
         const rx = right[9].x;
-        if (lastRightX !== null && gestureCooldown===0) {
+        if (lastRightX !== null && gestureCooldown === 0) {
           if (left && isFist(left)) {
-            if (rx - lastRightX > 0.15) { nextImage(); gestureCooldown=20; }
-            if (lastRightX - rx > 0.15) { prevImage(); gestureCooldown=20; }
+            if (rx - lastRightX > 0.10) { nextImage(); gestureCooldown = 25; }
+            if (lastRightX - rx > 0.10) { prevImage(); gestureCooldown = 25; }
           }
         }
         lastRightX = rx;
       }
 
-      if (right) {
-        if (left && isFist(left) && isIndexOnly(right)) {
-          drawing = true;
-          const x = right[8].x * canvas.width;
-          const y = right[8].y * canvas.height;
-          if (lastX===null) { lastX=x; lastY=y; }
-          ctx.beginPath();
-          ctx.moveTo(lastX,lastY);
-          ctx.lineTo(x,y);
-          ctx.strokeStyle = "red";
-          ctx.lineWidth = 3;
-          ctx.stroke();
-          lastX=x; lastY=y;
-        } else {
-          drawing=false;
-          lastX=null; lastY=null;
-        }
+      // Dessin index droit seul + main gauche poing
+      if (right && left && isFist(left) && isIndexOnly(right)) {
+        const x = right[8].x * drawCanvas.width;
+        const y = right[8].y * drawCanvas.height;
+        if (lastX === null) { lastX = x; lastY = y; }
+        drawCtx.beginPath();
+        drawCtx.moveTo(lastX,lastY);
+        drawCtx.lineTo(x,y);
+        drawCtx.strokeStyle = "red";
+        drawCtx.lineWidth = 3;
+        drawCtx.stroke();
+        lastX = x; lastY = y;
+      } else {
+        lastX = null; lastY = null;
       }
 
+      // Effacement du dessin
       if (right && isPinch(right)) clearDrawing();
 
+      // Stop programme
       if (right && left && isFist(right) && isFist(left)) {
         alert("Programme arrêté");
         location.reload();
