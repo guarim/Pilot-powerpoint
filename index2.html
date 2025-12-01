@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gesture Diaporama</title>
+  <style>
+    body { display:flex; flex-direction:column; align-items:center; font-family:sans-serif; }
+    #viewer { width:800px; height:450px; border:1px solid #ccc; background-size:contain; background-repeat:no-repeat; background-position:center; }
+    canvas { position:absolute; left:0; top:0; }
+    #wrapper { position:relative; }
+  </style>
+</head>
+<body>
+  <h1>Gesture Diaporama</h1>
+  <div id="wrapper">
+    <div id="viewer"></div>
+    <canvas id="drawCanvas" width="800" height="450"></canvas>
+  </div>
+
+  <video id="video" autoplay playsinline style="display:none"></video>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    const images = ["asset/1.png", "asset/2.png", "asset/3.png"]; // étendre selon besoin
+    let index = 0;
+    const viewer = document.getElementById("viewer");
+    viewer.style.backgroundImage = `url(${images[index]})`;
+
+    const canvas = document.getElementById("drawCanvas");
+    const ctx = canvas.getContext("2d");
+
+    let drawing = false;
+    let lastX = null, lastY = null;
+
+    function nextImage() {
+      index = (index + 1) % images.length;
+      viewer.style.backgroundImage = `url(${images[index]})`;
+    }
+
+    function prevImage() {
+      index = (index - 1 + images.length) % images.length;
+      viewer.style.backgroundImage = `url(${images[index]})`;
+    }
+
+    function clearDrawing() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+    }
+
+    function isFist(landmarks) {
+      // Détection poing très simplifiée : doigts repliés
+      const tips = [8,12,16,20];
+      const mcp = [5,9,13,17];
+      let count = 0;
+      for (let i=0;i<4;i++) if (landmarks[tips[i]].y > landmarks[mcp[i]].y) count++;
+      return count>=3;
+    }
+
+    function isIndexOnly(landmarks) {
+      const indexUp = landmarks[8].y < landmarks[6].y;
+      const othersDown = landmarks[12].y > landmarks[10].y && landmarks[16].y > landmarks[14].y && landmarks[20].y > landmarks[18].y;
+      return indexUp && othersDown;
+    }
+
+    function isPinch(landmarks) {
+      const dx = landmarks[8].x - landmarks[4].x;
+      const dy = landmarks[8].y - landmarks[4].y;
+      return Math.hypot(dx,dy) < 0.03;
+    }
+
+    let lastRightX = null;
+    let gestureCooldown = 0;
+
+    function onResults(results) {
+      if (gestureCooldown > 0) gestureCooldown--;
+
+      if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+
+      let right = null, left = null;
+      results.multiHandedness.forEach((h,i)=>{
+        if (h.label === "Right") right = results.multiHandLandmarks[i];
+        else left = results.multiHandLandLandmarks[i];
+      });
+
+      if (right) {
+        const rx = right[9].x;
+        if (lastRightX !== null && gestureCooldown===0) {
+          if (left && isFist(left)) {
+            if (rx - lastRightX > 0.15) { nextImage(); gestureCooldown=20; }
+            if (lastRightX - rx > 0.15) { prevImage(); gestureCooldown=20; }
+          }
+        }
+        lastRightX = rx;
+      }
+
+      if (right) {
+        if (left && isFist(left) && isIndexOnly(right)) {
+          drawing = true;
+          const x = right[8].x * canvas.width;
+          const y = right[8].y * canvas.height;
+          if (lastX===null) { lastX=x; lastY=y; }
+          ctx.beginPath();
+          ctx.moveTo(lastX,lastY);
+          ctx.lineTo(x,y);
+          ctx.strokeStyle = "red";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          lastX=x; lastY=y;
+        } else {
+          drawing=false;
+          lastX=null; lastY=null;
+        }
+      }
+
+      if (right && isPinch(right)) clearDrawing();
+
+      if (right && left && isFist(right) && isFist(left)) {
+        alert("Programme arrêté");
+        location.reload();
+      }
+    }
+
+    const video = document.getElementById("video");
+    const hands = new Hands({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+    hands.onResults(onResults);
+
+    const camera = new Camera(video, {
+      onFrame: async () => { await hands.send({image: video}); },
+      width: 640,
+      height: 480
+    });
+    camera.start();
+  </script>
+</body>
+</html>
