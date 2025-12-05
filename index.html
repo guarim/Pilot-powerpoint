@@ -2,22 +2,23 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
-  <title>Gesture Diaporama Debug + Drawing Tools</title>
+  <title>Gesture Diaporama Pro</title>
   <style>
-    body { display:flex; flex-direction:row; gap:20px; font-family:sans-serif; }
-    #left { display:flex; flex-direction:column; gap:10px; }
-    #viewer { width:800px; height:450px; border:1px solid #ccc; background-size:contain; background-repeat:no-repeat; background-position:center; }
-    #drawCanvas, #videoCanvas { position:absolute; left:0; top:0; }
+    body { display:flex; gap:25px; margin:0; background:#1a1a1a; color:white; font-family:Arial; }
+    #left { display:flex; flex-direction:column; gap:10px; padding:20px; }
+    #viewer { width:800px; height:450px; border-radius:12px; border:2px solid #444; background-size:contain; background-repeat:no-repeat; background-position:center; transition:opacity 0.4s; }
+    #drawCanvas, #videoCanvas { position:absolute; left:0; top:0; pointer-events:none; border-radius:12px; }
     #wrapper { position:relative; width:800px; height:450px; }
-    #debug { width:350px; height:450px; overflow:auto; border:1px solid #999; padding:10px; background:#f7f7f7; }
-    #fingerState { display:flex; gap:4px; margin-top:10px; }
-    .fingerBox { width:40px; height:40px; border-radius:6px; border:1px solid #777; display:flex; justify-content:center; align-items:center; font-size:12px; }
-    #tools { margin-top:15px; padding:10px; border:1px solid #aaa; background:#eee; }
+    #debug { width:360px; height:92vh; overflow:auto; border-left:2px solid #333; padding:20px; background:#111; }
+    #fingerState { display:flex; gap:6px; margin-top:10px; }
+    .fingerBox { width:50px; height:50px; border-radius:8px; border:1px solid #555; display:flex; justify-content:center; align-items:center; color:white; font-size:11px; }
+    #tools { margin-top:15px; padding:15px; border-radius:12px; background:#222; border:1px solid #555; }
+    #graph { width:100%; height:120px; background:#000; border-radius:8px; margin-top:10px; }
   </style>
 </head>
 <body>
   <div id="left">
-    <h2>Diaporama + Dessin</h2>
+    <h2>Diaporama + Dessin Pro</h2>
     <div id="wrapper">
       <div id="viewer"></div>
       <canvas id="drawCanvas" width="800" height="450"></canvas>
@@ -25,10 +26,25 @@
     </div>
 
     <div id="tools">
-      <label>Couleur: <input type="color" id="colorPicker" value="#ff0000"></label>
-      <label style="margin-left:10px;">Épaisseur: <input type="range" id="widthPicker" min="1" max="20" value="4"></label>
+      <h3>Outils de dessin</h3>
+      <label>Couleur: <input type="color" id="colorPicker" value="#00ffea"></label>
+      <label style="margin-left:10px;">Épaisseur: <input type="range" id="widthPicker" min="1" max="30" value="5"></label>
+
+      <br><br>
+      <label>Style:
+        <select id="stylePicker">
+          <option value="normal">Normal</option>
+          <option value="dot">Pointillé</option>
+          <option value="neon">Néon</option>
+          <option value="brush">Brosse</option>
+        </select>
+      </label>
+      <br><br>
       <button id="saveBtn">Enregistrer le dessin</button>
     </div>
+
+    <canvas id="graph" width="350" height="120"></canvas>
+
   </div>
 
   <div id="debug">
@@ -53,10 +69,10 @@
 
   <script>
     async function loadImages() {
-      let list = [];
-      for (let i=1;i<500;i++) {
+      const list = [];
+      for (let i=1;i<400;i++) {
         try {
-          const res = await fetch(`asset/${i}.png`,{method:"HEAD"});
+          const res = await fetch(`asset/${i}.png`, {method:"HEAD"});
           if (res.ok) list.push(`asset/${i}.png`);
         } catch {}
       }
@@ -69,7 +85,7 @@
 
     loadImages().then(imgs => {
       images = imgs;
-      viewer.style.backgroundImage = `url(${images[0]})`;
+      if (images.length>0) viewer.style.backgroundImage = `url(${images[0]})`;
     });
 
     const drawCanvas = document.getElementById("drawCanvas");
@@ -77,151 +93,93 @@
     const videoCanvas = document.getElementById("videoCanvas");
     const videoCtx = videoCanvas.getContext("2d");
     const debugText = document.getElementById("debugText");
+    const graph = document.getElementById("graph");
+    const graphCtx = graph.getContext("2d");
 
     let color = document.getElementById("colorPicker").value;
     let width = document.getElementById("widthPicker").value;
-    document.getElementById("colorPicker").oninput = e => color = e.target.value;
-    document.getElementById("widthPicker").oninput = e => width = e.target.value;
+    let style = document.getElementById("stylePicker").value;
+
+    document.getElementById("colorPicker").oninput = e => color=e.target.value;
+    document.getElementById("widthPicker").oninput = e => width=e.target.value;
+    document.getElementById("stylePicker").oninput = e => style=e.target.value;
 
     document.getElementById("saveBtn").onclick = () => {
-      const link = document.createElement("a");
-      link.download = "dessin.png";
-      link.href = drawCanvas.toDataURL();
-      link.click();
+      const a=document.createElement("a");
+      a.download="dessin.png";
+      a.href=drawCanvas.toDataURL();
+      a.click();
     };
 
-    function nextImage() {
-      if (images.length === 0) return;
-      index = (index + 1) % images.length;
-      viewer.style.backgroundImage = `url(${images[index]})`;
+    function animateImageChange(newImage){
+      viewer.style.opacity=0;
+      setTimeout(()=>{
+        viewer.style.backgroundImage=`url(${newImage})`;
+        viewer.style.opacity=1;
+      },200);
     }
 
-    function prevImage() {
-      if (images.length === 0) return;
-      index = (index - 1 + images.length) % images.length;
-      viewer.style.backgroundImage = `url(${images[index]})`;
-    }
+    function nextImage(){ if(images.length){ index=(index+1)%images.length; animateImageChange(images[index]); }}
+    function prevImage(){ if(images.length){ index=(index-1+images.length)%images.length; animateImageChange(images[index]); }}
 
-    function clearDrawing() {
-      drawCtx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
-    }
+    function clearDrawing(){ drawCtx.clearRect(0,0,drawCanvas.width,drawCanvas.height); }
 
-    function isFingerUp(lm, tip, pip) {
-      return lm[tip].y < lm[pip].y;
-    }
+    function isFingerUp(lm,tip,pip){ return lm[tip].y < lm[pip].y; }
 
-    function getFingerStates(lm) {
-      return {
-        thumb: lm[4].x < lm[3].x,
-        index: isFingerUp(lm,8,6),
-        middle: isFingerUp(lm,12,10),
-        ring: isFingerUp(lm,16,14),
-        pinky: isFingerUp(lm,20,18)
-      };
-    }
+    function getFingerStates(lm){ return { thumb:lm[4].x < lm[3].x, index:isFingerUp(lm,8,6), middle:isFingerUp(lm,12,10), ring:isFingerUp(lm,16,14), pinky:isFingerUp(lm,20,18)} }
 
-    function updateFingerBoxes(state) {
-      const map = {
-        thumbBox: state.thumb,
-        indexBox: state.index,
-        middleBox: state.middle,
-        ringBox: state.ring,
-        pinkyBox: state.pinky
-      };
-      for (let id in map) {
-        document.getElementById(id).style.background = map[id] ? "#7f7" : "#f77";
+    function updateFingerBoxes(s){ const map={thumbBox:s.thumb,indexBox:s.index,middleBox:s.middle,ringBox:s.ring,pinkyBox:s.pinky}; for(let id in map) document.getElementById(id).style.background=map[id]?"#0a0":"#700"; }
+
+    function robustGesture(landmarks){ let sumY=0; for(const p of landmarks) sumY+=p.y; const avg=sumY/landmarks.length; return { verticalBias:avg }; }
+
+    function drawHands(image,hands){ videoCtx.clearRect(0,0,videoCanvas.width,videoCanvas.height); videoCtx.globalAlpha=0.8; videoCtx.drawImage(image,0,0,videoCanvas.width,videoCanvas.height); videoCtx.globalAlpha=1; hands.forEach(lm=>{ window.drawConnectors(videoCtx,lm,window.HAND_CONNECTIONS); window.drawLandmarks(videoCtx,lm);}); }
+
+    function drawGraph(dist){ graphCtx.fillStyle="#000"; graphCtx.fillRect(0,0,graph.width,graph.height); graphCtx.fillStyle="#0ff"; graphCtx.fillRect(0, graph.height-dist*3000, 20, dist*3000); }
+
+    function isPinch(lm){ const dx=lm[8].x-lm[4].x, dy=lm[8].y-lm[4].y; const d=Math.hypot(dx,dy); drawGraph(d); return d<0.025; }
+
+    let lastRightX=null, gestureCooldown=0;
+    let lastX=null,lastY=null;
+
+    function onResults(results){
+      if(gestureCooldown>0) gestureCooldown--;
+      drawHands(results.image,results.multiHandLandmarks||[]);
+      debugText.textContent = JSON.stringify(results.multiHandedness,null,2);
+      if(!results.multiHandLandmarks || results.multiHandLandmarks.length===0) return;
+
+      let right=null,left=null;
+      results.multiHandedness.forEach((h,i)=>{ if(h.label==="Right") right=results.multiHandLandmarks[i]; else left=results.multiHandLandmarks[i]; });
+
+      if(right) updateFingerBoxes(getFingerStates(right));
+
+      if(right){ const rx=right[9].x; if(lastRightX!==null && gestureCooldown===0){ if(left && robustGesture(left).verticalBias>0 && isFingerUp(left,8,6)==false){ if(rx-lastRightX>0.12){ nextImage(); gestureCooldown=25;} if(lastRightX-rx>0.12){ prevImage(); gestureCooldown=25;} }} lastRightX=rx; }
+
+      if(right && left && isFingerUp(left,12,10)==false && isFingerUp(left,8,6)==false && getFingerStates(right).index){ const x=right[8].x*drawCanvas.width, y=right[8].y*drawCanvas.height; if(lastX===null){ lastX=x; lastY=y; }
+
+        drawCtx.lineWidth=width;
+        if(style==="dot"){ drawCtx.setLineDash([10,10]); }
+        else drawCtx.setLineDash([]);
+
+        if(style==="neon"){ drawCtx.shadowBlur=15; drawCtx.shadowColor=color; }
+        else drawCtx.shadowBlur=0;
+
+        if(style==="brush"){ drawCtx.lineCap="round"; drawCtx.lineJoin="round"; }
+
+        drawCtx.beginPath(); drawCtx.moveTo(lastX,lastY); drawCtx.lineTo(x,y); drawCtx.strokeStyle=color; drawCtx.stroke(); lastX=x; lastY=y;
       }
+      else { lastX=null; lastY=null; }
+
+      if(right && isPinch(right)) clearDrawing();
+
+      if(right && left && getFingerStates(right).thumb==false && getFingerStates(right).index==false && getFingerStates(left).thumb==false) { alert("Programme arrêté"); location.reload(); }
     }
 
-    function isFist(lm) {
-      const s = getFingerStates(lm);
-      return !s.thumb && !s.index && !s.middle && !s.ring && !s.pinky;
-    }
-
-    function isIndexOnly(lm) {
-      const s = getFingerStates(lm);
-      return s.index && !s.middle && !s.ring && !s.pinky;
-    }
-
-    function isPinch(lm) {
-      const dx = lm[8].x - lm[4].x;
-      const dy = lm[8].y - lm[4].y;
-      return Math.hypot(dx,dy) < 0.02;
-    }
-
-    let lastRightX = null;
-    let gestureCooldown = 0;
-    let lastX = null, lastY = null;
-
-    function drawHands(image, hands) {
-      videoCtx.clearRect(0,0,videoCanvas.width,videoCanvas.height);
-      videoCtx.drawImage(image,0,0,videoCanvas.width,videoCanvas.height);
-      for (const lm of hands) {
-        window.drawConnectors(videoCtx, lm, window.HAND_CONNECTIONS);
-        window.drawLandmarks(videoCtx, lm);
-      }
-    }
-
-    function onResults(results) {
-      if (gestureCooldown > 0) gestureCooldown--;
-
-      drawHands(results.image, results.multiHandLandmarks || []);
-
-      debugText.textContent = JSON.stringify(results.multiHandedness, null, 2);
-
-      if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
-
-      let right = null, left = null;
-      results.multiHandedness.forEach((h,i)=>{
-        if (h.label === "Right") right = results.multiHandLandmarks[i];
-        else left = results.multiHandLandmarks[i];
-      });
-
-      if (right) updateFingerBoxes(getFingerStates(right));
-
-      if (right) {
-        const rx = right[9].x;
-        if (lastRightX !== null && gestureCooldown === 0) {
-          if (left && isFist(left)) {
-            if (rx - lastRightX > 0.10) { nextImage(); gestureCooldown = 25; }
-            if (lastRightX - rx > 0.10) { prevImage(); gestureCooldown = 25; }
-          }
-        }
-        lastRightX = rx;
-      }
-
-      if (right && left && isFist(left) && isIndexOnly(right)) {
-        const x = right[8].x * drawCanvas.width;
-        const y = right[8].y * drawCanvas.height;
-        if (lastX === null) { lastX = x; lastY = y; }
-        drawCtx.beginPath();
-        drawCtx.moveTo(lastX,lastY);
-        drawCtx.lineTo(x,y);
-        drawCtx.strokeStyle = color;
-        drawCtx.lineWidth = width;
-        drawCtx.stroke();
-        lastX = x; lastY = y;
-      } else { lastX=null; lastY=null; }
-
-      if (right && isPinch(right)) clearDrawing();
-
-      if (right && left && isFist(right) && isFist(left)) {
-        alert("Programme arrêté");
-        location.reload();
-      }
-    }
-
-    const video = document.getElementById("video");
-    const hands = new Hands({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+    const video=document.getElementById("video");
+    const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.7, minTrackingConfidence:0.7 });
     hands.onResults(onResults);
 
-    const camera = new Camera(video, {
-      onFrame: async () => { await hands.send({image: video}); },
-      width: 640,
-      height: 480
-    });
-    camera.start();
+    const camera=new Camera(video,{ onFrame: async()=>{ await hands.send({image:video}); }, width:640, height:480 }); camera.start();
   </script>
 </body>
 </html>
