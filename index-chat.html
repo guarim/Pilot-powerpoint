@@ -2,29 +2,47 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
-  <title>Gesture Diaporama Debug</title>
+  <title>Gesture Diaporama Debug + Drawing Tools</title>
   <style>
     body { display:flex; flex-direction:row; gap:20px; font-family:sans-serif; }
     #left { display:flex; flex-direction:column; gap:10px; }
     #viewer { width:800px; height:450px; border:1px solid #ccc; background-size:contain; background-repeat:no-repeat; background-position:center; }
-    #drawCanvas, #videoCanvas { position:absolute; left:0; top:200; }
+    #drawCanvas, #videoCanvas { position:absolute; left:0; top:0; }
     #wrapper { position:relative; width:800px; height:450px; }
-    #debug { width:300px; height:450px; overflow:auto; border:1px solid #999; padding:10px; font-size:14px; background:#f7f7f7; }
+    #debug { width:350px; height:450px; overflow:auto; border:1px solid #999; padding:10px; background:#f7f7f7; }
+    #fingerState { display:flex; gap:4px; margin-top:10px; }
+    .fingerBox { width:40px; height:40px; border-radius:6px; border:1px solid #777; display:flex; justify-content:center; align-items:center; font-size:12px; }
+    #tools { margin-top:15px; padding:10px; border:1px solid #aaa; background:#eee; }
   </style>
 </head>
 <body>
   <div id="left">
-    <h2>Diaporama</h2>
+    <h2>Diaporama + Dessin</h2>
     <div id="wrapper">
       <div id="viewer"></div>
       <canvas id="drawCanvas" width="800" height="450"></canvas>
-      <canvas id="videoCanvas" width="640" height="480"></canvas>
+      <canvas id="videoCanvas" width="800" height="450"></canvas>
+    </div>
+
+    <div id="tools">
+      <label>Couleur: <input type="color" id="colorPicker" value="#ff0000"></label>
+      <label style="margin-left:10px;">Épaisseur: <input type="range" id="widthPicker" min="1" max="20" value="4"></label>
+      <button id="saveBtn">Enregistrer le dessin</button>
     </div>
   </div>
 
   <div id="debug">
     <h3>Debug</h3>
     <pre id="debugText">En attente...</pre>
+
+    <h4>État des doigts (main droite)</h4>
+    <div id="fingerState">
+      <div class="fingerBox" id="thumbBox">Pouce</div>
+      <div class="fingerBox" id="indexBox">Index</div>
+      <div class="fingerBox" id="middleBox">Majeur</div>
+      <div class="fingerBox" id="ringBox">Annulaire</div>
+      <div class="fingerBox" id="pinkyBox">Auriculaire</div>
+    </div>
   </div>
 
   <video id="video" autoplay playsinline style="display:none"></video>
@@ -34,27 +52,52 @@
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
   <script>
-    const images = ["asset/1.png", "asset/2.png", "asset/3.png", "asset/4.png", "asset/5.png", "asset/6.png", "asset/7.png", "asset/8.png", "asset/9.png", "asset/10.png", "asset/11.png"]; // étendre selon besoin
+    async function loadImages() {
+      let list = [];
+      for (let i=1;i<500;i++) {
+        try {
+          const res = await fetch(`asset/${i}.png`,{method:"HEAD"});
+          if (res.ok) list.push(`asset/${i}.png`);
+        } catch {}
+      }
+      return list;
+    }
+
+    let images = [];
     let index = 0;
     const viewer = document.getElementById("viewer");
-    viewer.style.backgroundImage = `url(${images[index]})`;
+
+    loadImages().then(imgs => {
+      images = imgs;
+      viewer.style.backgroundImage = `url(${images[0]})`;
+    });
 
     const drawCanvas = document.getElementById("drawCanvas");
     const drawCtx = drawCanvas.getContext("2d");
     const videoCanvas = document.getElementById("videoCanvas");
     const videoCtx = videoCanvas.getContext("2d");
-
     const debugText = document.getElementById("debugText");
 
-    let drawing = false;
-    let lastX = null, lastY = null;
+    let color = document.getElementById("colorPicker").value;
+    let width = document.getElementById("widthPicker").value;
+    document.getElementById("colorPicker").oninput = e => color = e.target.value;
+    document.getElementById("widthPicker").oninput = e => width = e.target.value;
+
+    document.getElementById("saveBtn").onclick = () => {
+      const link = document.createElement("a");
+      link.download = "dessin.png";
+      link.href = drawCanvas.toDataURL();
+      link.click();
+    };
 
     function nextImage() {
+      if (images.length === 0) return;
       index = (index + 1) % images.length;
       viewer.style.backgroundImage = `url(${images[index]})`;
     }
 
     function prevImage() {
+      if (images.length === 0) return;
       index = (index - 1 + images.length) % images.length;
       viewer.style.backgroundImage = `url(${images[index]})`;
     }
@@ -63,28 +106,52 @@
       drawCtx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
     }
 
-    // Détection poing plus fiable avec distances doigts
-    function isFist(landmarks) {
-      const folded = [8,12,16,20].map(tip => landmarks[tip].y > landmarks[0].y + 0.05);
-      return folded.filter(x=>x).length >= 3;
+    function isFingerUp(lm, tip, pip) {
+      return lm[tip].y < lm[pip].y;
     }
 
-    function isIndexOnly(landmarks) {
-      const indexUp = landmarks[8].y < landmarks[6].y;
-      const middleDown = landmarks[12].y > landmarks[10].y;
-      const ringDown = landmarks[16].y > landmarks[14].y;
-      const pinkyDown = landmarks[20].y > landmarks[18].y;
-      return indexUp && middleDown && ringDown && pinkyDown;
+    function getFingerStates(lm) {
+      return {
+        thumb: lm[4].x < lm[3].x,
+        index: isFingerUp(lm,8,6),
+        middle: isFingerUp(lm,12,10),
+        ring: isFingerUp(lm,16,14),
+        pinky: isFingerUp(lm,20,18)
+      };
     }
 
-    function isPinch(landmarks) {
-      const dx = landmarks[8].x - landmarks[4].x;
-      const dy = landmarks[8].y - landmarks[4].y;
+    function updateFingerBoxes(state) {
+      const map = {
+        thumbBox: state.thumb,
+        indexBox: state.index,
+        middleBox: state.middle,
+        ringBox: state.ring,
+        pinkyBox: state.pinky
+      };
+      for (let id in map) {
+        document.getElementById(id).style.background = map[id] ? "#7f7" : "#f77";
+      }
+    }
+
+    function isFist(lm) {
+      const s = getFingerStates(lm);
+      return !s.thumb && !s.index && !s.middle && !s.ring && !s.pinky;
+    }
+
+    function isIndexOnly(lm) {
+      const s = getFingerStates(lm);
+      return s.index && !s.middle && !s.ring && !s.pinky;
+    }
+
+    function isPinch(lm) {
+      const dx = lm[8].x - lm[4].x;
+      const dy = lm[8].y - lm[4].y;
       return Math.hypot(dx,dy) < 0.02;
     }
 
     let lastRightX = null;
     let gestureCooldown = 0;
+    let lastX = null, lastY = null;
 
     function drawHands(image, hands) {
       videoCtx.clearRect(0,0,videoCanvas.width,videoCanvas.height);
@@ -100,11 +167,7 @@
 
       drawHands(results.image, results.multiHandLandmarks || []);
 
-      // Debug info
-      debugText.textContent = JSON.stringify({
-        handsDetected: results.multiHandedness || [],
-        gestures: {}
-      }, null, 2);
+      debugText.textContent = JSON.stringify(results.multiHandedness, null, 2);
 
       if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
 
@@ -114,7 +177,8 @@
         else left = results.multiHandLandmarks[i];
       });
 
-      // Déplacements main droite
+      if (right) updateFingerBoxes(getFingerStates(right));
+
       if (right) {
         const rx = right[9].x;
         if (lastRightX !== null && gestureCooldown === 0) {
@@ -126,7 +190,6 @@
         lastRightX = rx;
       }
 
-      // Dessin index droit seul + main gauche poing
       if (right && left && isFist(left) && isIndexOnly(right)) {
         const x = right[8].x * drawCanvas.width;
         const y = right[8].y * drawCanvas.height;
@@ -134,18 +197,14 @@
         drawCtx.beginPath();
         drawCtx.moveTo(lastX,lastY);
         drawCtx.lineTo(x,y);
-        drawCtx.strokeStyle = "red";
-        drawCtx.lineWidth = 3;
+        drawCtx.strokeStyle = color;
+        drawCtx.lineWidth = width;
         drawCtx.stroke();
         lastX = x; lastY = y;
-      } else {
-        lastX = null; lastY = null;
-      }
+      } else { lastX=null; lastY=null; }
 
-      // Effacement du dessin
       if (right && isPinch(right)) clearDrawing();
 
-      // Stop programme
       if (right && left && isFist(right) && isFist(left)) {
         alert("Programme arrêté");
         location.reload();
